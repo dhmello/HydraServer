@@ -2,3 +2,11 @@
 bin/
 obj/
 publish/
+obj/Debug/net8.0-windows/refint/HydraServer.dll
+obj/Debug/net8.0-windows/ref/HydraServer.dll
+obj/Debug/net8.0-windows/HydraServer.sourcelink.json
+obj/Debug/net8.0-windows/HydraServer.pdb
+obj/Debug/net8.0-windows/HydraServer.genruntimeconfig.cache
+obj/Debug/net8.0-windows/HydraServer.dll
+obj/Debug/net8.0-windows/HydraServer.AssemblyInfoInputs.cache
+obj/Debug/net8.0-windows/HydraServer.AssemblyInfo.cs
