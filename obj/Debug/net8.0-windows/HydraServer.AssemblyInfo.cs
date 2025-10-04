@@ -14,7 +14,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("HydraServer")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+640192b09a0ab73c9812e7be1265b693ce6225c3")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+65982f6073ee816d673a419432ec0f6a010c3f3b")]
 [assembly: System.Reflection.AssemblyProductAttribute("HydraServer")]
 [assembly: System.Reflection.AssemblyTitleAttribute("HydraServer")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

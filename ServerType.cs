@@ -16,6 +16,8 @@ namespace HydraServer
         public string? MapLogin { get; init; }
         public string? ReceivedCharacters { get; init; }
         public int CharBlockSize { get; init; } = 116;
+        public string? SendCryptKeys { get; init; }
+        public byte Mode { get; set; } // Adicionado para armazenar o valor de msg[2]
 
         public override string ToString() => Name ?? base.ToString()!;
     }

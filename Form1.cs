@@ -163,7 +163,9 @@ namespace HydraServer
 
             try
             {
-                
+                p.Stop();
+                p.DisposeAsync().AsTask().GetAwaiter().GetResult();
+                p.Start();
                 Log($"🔄 Reload OK (Par {p.Index})");
                 RefreshGrid();
             }
@@ -208,6 +210,7 @@ namespace HydraServer
             try
             {
                 p.Stop();
+                p.DisposeAsync().AsTask().GetAwaiter().GetResult();
                 Log($"⏹ Stop OK (Par {p.Index})");
                 RefreshGrid();
             }
