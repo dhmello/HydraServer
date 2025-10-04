@@ -7,10 +7,10 @@ using System.Threading.Tasks;
 
 namespace HydraServer
 {
-    /// Emula o RagnarokServer.pm (login+map) e publica resp. de GG.
+    /// Emulador de servidor RO (porte do Poseidon RagnarokServer.pm)
     internal sealed class RagnarokHandler_RO : IRagnarokHandler
     {
-        // IDs “fake” – batem com o Poseidon Perl
+        // IDs/sessões “fake”, iguais ao Poseidon
         static readonly byte[] AccountID = Pack.U32(2000001);
         static readonly byte[] CharID = Pack.U32(100001);
         static readonly byte[] SessionID = Pack.U32(3000000000u);
@@ -21,17 +21,21 @@ namespace HydraServer
         readonly ServerType _st;
         public RagnarokHandler_RO(ServerType st) => _st = st;
 
+        // ---- estado por conexão ----
         sealed class RoState
         {
             public bool ConnectedToMap;
             public int ChallengeNum;
         }
 
-        public void Tick(HydraSession session) { }
+        public void Tick(HydraSession session) { /* opcional */ }
 
-        public async ValueTask<bool> OnClientDataAsync(HydraSession s, ReadOnlyMemory<byte> data, CancellationToken ct)
+        // ===================== PARSER =====================
+        public async ValueTask<bool> OnClientDataAsync(HydraSession session, ReadOnlyMemory<byte> data, CancellationToken ct)
         {
-            var st = GetState(s);
+            var st = GetState(session);
+
+            // trabalhe em cima de array, sem Span persistente (C#12 safe)
             var buf = data.ToArray();
             int off = 0, n = buf.Length;
 
@@ -40,98 +44,133 @@ namespace HydraServer
                 ushort op = BinaryPrimitives.ReadUInt16LittleEndian(new ReadOnlySpan<byte>(buf, off, 2));
                 int len = ReadLen(buf, off);
                 if (len <= 0 || off + len > n) break;
+
                 var msg = new byte[len];
                 Buffer.BlockCopy(buf, off, msg, 0, len);
                 off += len;
-                await Handle(s, st, op, msg, ct);
+
+                session.Log($"[RO] <= {Hex(msg)}  (0x{op:X4}, {len} bytes)");
+                await Handle(session, st, op, msg, ct);
             }
             return true;
         }
+
+        // =================================================
 
         async Task Handle(HydraSession s, RoState st, ushort op, byte[] msg, CancellationToken ct)
         {
             string sw = op.ToString("X4");
 
-            // == GameGuard replies (0228/09D0/02A7) -> publicar para QRY ==
+            // ===== GameGuard replies (0228/09D0/02A7) -> publicar para o Query =====
             if (op == 0x09D0 || op == 0x0228 || op == 0x02A7)
             {
                 var resp = BuildGGResponse(op, msg);
                 PoseidonRegistry.ForPair(ExtractPairIndexFromTag(s.Tag)).SetResponse(resp, s.Log);
+                s.Log("[RO] GG response registrada no PoseidonRegistry");
                 return;
             }
 
-            // == secure_login (01DB/0204) -> 01DC ==
+            // ===== secure_login (01DB/0204) -> secure_login_reply (01DC) =====
             if (sw == "01DB" || sw == "0204")
             {
-                await Send(s, Pack.Join(Pack.U16(0x01DC), Pack.U16(0x14), Pack.Zero(0x11)), ct);
+                // 01DC com length=0x14 e 4 dwords zero (igual Poseidon)
+                var reply = Pack.Join(
+                    Pack.U16(0x01DC),      // opcode
+                    Pack.U16(0x14),        // length 20
+                    Pack.U32(0),           // result
+                    Pack.U32(0),           // flag
+                    Pack.U32(0),
+                    Pack.U32(0)
+                );
+                await Send(s, reply, ct);
+                s.Log("[RO] => secure_login_reply (01DC)");
+
+                // já manda “account server info” pra liberar a lista de servidores
+                var asi = BuildAccountServerInfo(s);
+                await Send(s, asi, ct);
+                s.Log("[RO] => account_server_info enviado");
                 return;
             }
 
-            // == token request (0ACF/0C26) -> 0AE3 ==
+            // ===== token ===== (0ACF/0C26 -> 0AE3)
             if (sw == "0ACF" || sw == "0C26")
             {
                 var w = new Buf();
-                w.U16(0x0AE3).U16(0x2F).S32(0).Z(20, "S1000").Z(0, "OpenkoreClientToken");
+                w.U16(0x0AE3).U16(0x2F).S32(0)   // login_type
+                 .Z(20, "S1000")                 // flag
+                 .Z(0, "OpenkoreClientToken");   // login_token
                 await Send(s, w.ToArray(), ct);
+                s.Log("[RO] => token_reply (0AE3)");
                 return;
             }
 
-            // == GameGuard challenge 0258 -> grant 0259 ==
+            // ===== gameguard challenge (0258) -> grant (0259) =====
             if (sw == "0258")
             {
-                byte grant = (byte)(st.ChallengeNum == 0 ? 0x01 : 0x02);
-                await Send(s, new byte[] { 0x59, 0x02, grant }, ct); // 0x0259
+                byte grant = (byte)(st.ChallengeNum == 0 ? 0x01 : 0x02); // 1: account, 2: char/map
+                await Send(s, new byte[] { 0x59, 0x02, grant }, ct);     // 0x0259
                 st.ChallengeNum++;
-                if (s.Debug) s.Log($"[RO] 0258 -> 0259 grant={grant}");
+                s.Log($"[RO] 0258 -> 0259 (grant={grant})");
                 return;
             }
 
-            // == master_login -> account_server_info ==
+            // ===== master_login -> account_server_info =====
             if (IsMasterLogin(sw))
             {
                 await Send(s, BuildAccountServerInfo(s), ct);
+                s.Log("[RO] => account_server_info (por master_login)");
                 return;
             }
 
-            // == escolha de servidor -> lista de personagens ==
-            if (sw == "0065" || sw == "0275" || HeurServerChoice(msg) || sw == "09A1")
+            // ===== server choice -> lista de personagens =====
+            if (sw == "0065" || sw == "0275" || HeurServerChoice(msg))
             {
                 await Send(s, BuildCharacterList(), ct);
+                s.Log("[RO] => character_list");
                 return;
             }
 
-            // == escolha do personagem -> map select ==
+            if (sw == "09A1")
+            {
+                await Send(s, BuildCharacterList(), ct);
+                s.Log("[RO] => character_list (09A1)");
+                return;
+            }
+
+            // ===== character choose -> map select =====
             if (sw == "0066")
             {
                 await Send(s, BuildCharMapSelect(s), ct);
+                s.Log("[RO] => char_map_select");
                 return;
             }
 
-            // == map_login ==
+            // ===== map_login =====
             if (IsMapLogin(sw))
             {
                 await HandleMapLogin(s, st, ct);
                 return;
             }
 
-            // == sync ==
+            // ===== sync =====
             if (IsSync(sw))
             {
                 await Send(s, Pack.Join(Pack.Bytes(0x7F, 0x00), Pack.U32((uint)Environment.TickCount)), ct);
+                s.Log("[RO] => sync_reply");
                 return;
             }
 
-            // == ping/quit ==
-            if (sw == "00B2") { await Send(s, Pack.Join(Pack.U16(0x00B3), Pack.U16(1)), ct); return; }
-            if (sw == "018A") { await Send(s, Pack.Join(Pack.U16(0x018B), Pack.U16(0)), ct); return; }
-            if (sw == "0B1C") { await Send(s, Pack.U16(0x0B1D), ct); return; }
+            // ===== outros pacotes “ping/quit” =====
+            if (sw == "00B2") { await Send(s, Pack.Join(Pack.U16(0x00B3), Pack.U16(1)), ct); s.Log("[RO] => go_char"); return; }
+            if (sw == "018A") { await Send(s, Pack.Join(Pack.U16(0x018B), Pack.U16(0)), ct); s.Log("[RO] => quit_ok"); return; }
+            if (sw == "0B1C") { await Send(s, Pack.U16(0x0B1D), ct); s.Log("[RO] => pong"); return; }
 
-            if (s.Debug) s.Log($"[RO] ignorado 0x{sw} ({msg.Length} bytes)");
+            s.Log($"[RO] ignorado 0x{sw} ({msg.Length} bytes)");
         }
 
         async Task HandleMapLogin(HydraSession s, RoState st, CancellationToken ct)
         {
-            await Send(s, Pack.Join(Pack.U16(0x0283), AccountID), ct);
+            await Send(s, Pack.Join(Pack.U16(0x0283), AccountID), ct); // map_login_ok (parcial)
 
             if ((_st.Name?.StartsWith("kRO", StringComparison.OrdinalIgnoreCase) ?? false))
                 await Send(s, Pack.Join(Pack.U16(0x0ADE), Pack.U32(0)), ct);
@@ -155,6 +194,7 @@ namespace HydraServer
                 await Send(s, Pack.U16(0x0B1B), ct);
 
             st.ConnectedToMap = true;
+            s.Log("[RO] => map_loaded + stats + confirm_load");
         }
 
         byte[] BuildCharMapSelect(HydraSession s)
@@ -172,7 +212,10 @@ namespace HydraServer
             var (a, b, c, d, port) = BindIpPort(s);
             byte sex = 1;
             var serverName = Pack.Z(20, "openkore.com.br");
-            var users = Pack.U32((uint)Math.Max(0, s.ServerClientCount - 1));
+
+            // fallback seguro caso a contagem não exista
+            int usersCount = Math.Max(0, s.ServerClientCount - 1);
+            var users32 = Pack.U32((uint)usersCount);
 
             if (asi == "0AC9" || asi == "0AAC")
                 return Pack.Join(
@@ -181,7 +224,7 @@ namespace HydraServer
                     Pack.Zero(4),
                     Pack.Z(26, DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString()),
                     Pack.U8(sex), Pack.Zero(6),
-                    serverName, users, Pack.Bytes(0x80, 0x32),
+                    serverName, users32, Pack.Bytes(0x80, 0x32),
                     Pack.ASCII($"{s.BindIp}:{s.BindPort}"),
                     Pack.Zero(114)
                 );
@@ -194,7 +237,7 @@ namespace HydraServer
                     Pack.Z(26, DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString()),
                     Pack.U8(sex),
                     Pack.Bytes(a, b, c, d), port,
-                    serverName, users, Pack.Zero(130)
+                    serverName, users32, Pack.Zero(130)
                 );
 
             if (asi == "0B60")
@@ -206,7 +249,7 @@ namespace HydraServer
                     Pack.U8(sex), Pack.Zero(0x11),
                     Pack.Bytes(a, b, c, d), port,
                     serverName, Pack.Zero(2),
-                    Pack.U16((ushort)Math.Min(ushort.MaxValue, Math.Max(0, s.ServerClientCount - 1))),
+                    Pack.U16((ushort)Math.Min(ushort.MaxValue, usersCount)),
                     Pack.U16(0x6985),
                     Pack.Zero(128 + 4)
                 );
@@ -219,7 +262,7 @@ namespace HydraServer
                     Pack.Z(26, DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString()),
                     Pack.U8(sex), Pack.Zero(0x11),
                     Pack.Bytes(a, b, c, d), port,
-                    serverName, users, Pack.Zero(130)
+                    serverName, users32, Pack.Zero(130)
                 );
 
             if (asi == "0276")
@@ -228,7 +271,7 @@ namespace HydraServer
                     SessionID, AccountID, SessionID2,
                     Pack.Zero(30), Pack.U8(sex), Pack.Zero(4),
                     Pack.Bytes(a, b, c, d), port,
-                    serverName, Pack.Zero(2), users, Pack.Zero(6)
+                    serverName, Pack.Zero(2), users32, Pack.Zero(6)
                 );
 
             // default 0069
@@ -236,7 +279,7 @@ namespace HydraServer
                 Pack.U16(0x0069), Pack.U16(0x4F),
                 SessionID, AccountID, SessionID2,
                 Pack.Zero(30), Pack.U8(sex),
-                Pack.Bytes(a, b, c, d), port, serverName, users, Pack.Zero(2)
+                Pack.Bytes(a, b, c, d), port, serverName, users32, Pack.Zero(2)
             );
         }
 
@@ -278,21 +321,21 @@ namespace HydraServer
 
         byte[] BuildCharBlock(int block, string name, int slot)
         {
-            // formato “universal” 116 bytes
-            // a4 V9 v V2 v14 Z24 C6 v2
+            // formato “universal” 116 bytes (a4 V9 v V2 v14 Z24 C6 v2)
             var w = new Buf();
             w.Bytes(CharID);
             for (int i = 0; i < 9; i++) w.U32(0);
             w.U16(0);
-            w.Bytes(new byte[8]);    // V2 fake
-            w.Bytes(new byte[28]);   // v14 fake
+            w.Bytes(new byte[8]);   // V2 fake
+            w.Bytes(new byte[28]);  // v14 fake
             w.Z(24, name);
-            w.Bytes(new byte[6]);    // C6
+            w.Bytes(new byte[6]);   // C6
             w.U16((ushort)slot);
-            w.U16(6);                // hairColor
+            w.U16(6);               // hairColor
             return w.ToArray();
         }
 
+        // ===== helpers =====
         static RoState GetState(HydraSession s)
         {
             if (s.Items.TryGetValue("__RO", out var o) && o is RoState st) return st;
@@ -302,6 +345,14 @@ namespace HydraServer
         static async Task Send(HydraSession s, byte[] data, CancellationToken ct)
         {
             await s.SendAsync(data, ct);
+            s.Log($"=> {Hex(data)}");
+        }
+
+        static string Hex(byte[] b)
+        {
+            var sb = new StringBuilder(b.Length * 2);
+            foreach (var x in b) sb.Append(x.ToString("X2"));
+            return sb.ToString();
         }
 
         static (byte, byte, byte, byte, byte[]) BindIpPort(HydraSession s)
@@ -314,7 +365,7 @@ namespace HydraServer
                 byte.TryParse(parts[1], out b) &&
                 byte.TryParse(parts[2], out c) &&
                 byte.TryParse(parts[3], out d))
-            { }
+            { /* ok */ }
             return (a, b, c, d, Pack.U16((ushort)s.BindPort));
         }
 
@@ -336,6 +387,7 @@ namespace HydraServer
         static bool IsSync(string sw) =>
             sw is "007E" or "035F" or "0089" or "0116" or "00A7" or "0360";
 
+        // lê length no [off+2..off+3] (se inválido, limita em 1024)
         static int ReadLen(byte[] buf, int off)
         {
             if (off + 4 <= buf.Length)
@@ -365,10 +417,10 @@ namespace HydraServer
             return (c >= '1' && c <= '9') ? (c - '0') : 1;
         }
 
-        // ===== helpers de empacote =====
+        // ===== empacotadores =====
         static class Pack
         {
-            public static byte[] U8(byte v) { return new[] { v }; }
+            public static byte[] U8(byte v) => new[] { v };
             public static byte[] U16(ushort v) { var b = new byte[2]; BinaryPrimitives.WriteUInt16LittleEndian(b, v); return b; }
             public static byte[] U32(uint v) { var b = new byte[4]; BinaryPrimitives.WriteUInt32LittleEndian(b, v); return b; }
             public static byte[] Bytes(params byte[] v) => v;

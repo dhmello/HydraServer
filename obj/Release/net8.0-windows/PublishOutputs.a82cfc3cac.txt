@@ -1,0 +1,5 @@
+E:\Projetos\HydraServer\publish\HydraServer.exe
+E:\Projetos\HydraServer\publish\HydraServer.dll
+E:\Projetos\HydraServer\publish\HydraServer.deps.json
+E:\Projetos\HydraServer\publish\HydraServer.runtimeconfig.json
+E:\Projetos\HydraServer\publish\HydraServer.pdb

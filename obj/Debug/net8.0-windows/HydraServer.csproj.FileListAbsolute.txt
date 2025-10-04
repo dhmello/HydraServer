@@ -14,3 +14,5 @@ E:\Projetos\HydraServer\obj\Debug\net8.0-windows\refint\HydraServer.dll
 E:\Projetos\HydraServer\obj\Debug\net8.0-windows\HydraServer.pdb
 E:\Projetos\HydraServer\obj\Debug\net8.0-windows\HydraServer.genruntimeconfig.cache
 E:\Projetos\HydraServer\obj\Debug\net8.0-windows\ref\HydraServer.dll
+E:\Projetos\HydraServer\obj\Debug\net8.0-windows\HydraServer.sourcelink.json
+E:\Projetos\HydraServer\obj\Debug\net8.0-windows\HydraServer.Properties.Resources.resources
