@@ -10,3 +10,5 @@ obj/Debug/net8.0-windows/HydraServer.genruntimeconfig.cache
 obj/Debug/net8.0-windows/HydraServer.dll
 obj/Debug/net8.0-windows/HydraServer.AssemblyInfoInputs.cache
 obj/Debug/net8.0-windows/HydraServer.AssemblyInfo.cs
+obj/Debug/net8.0-windows/HydraServer.sourcelink.json
+/obj
